@@ -1,4 +1,4 @@
-# Revision history for wri
+# Revision history for wam
 
 ## 0.1.0.0 -- YYYY-mm-dd
 
