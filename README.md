@@ -1,4 +1,4 @@
-## wam
+## wam!
 
 <img src="logo.png" alt="wam" width="200"/>
 
