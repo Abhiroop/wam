@@ -22,8 +22,6 @@ data Value = S32  I32  | S64  I64
 
 type Name = [Char]
 
--- type Ptr = Int -- pointer
-
 -----------------------VALUES----------------------------
 
 -----------------------TYPES----------------------------
@@ -44,9 +42,12 @@ instance Show FuncType where
   show (FTy argty resty) =
     show argty <> "->" <> show resty
 
-type MemType    = (U32, U32)
+-- https://webassembly.github.io/spec/core/syntax/types.html#limits
+type Limits = (U32, Maybe U32)
 
-type TableType  = (U32, U32) -- tabletype ::= limits reftype
+type MemType = Limits
+
+data TableType = TTy Limits RefType deriving (Show, Eq)-- tabletype ::= limits reftype
 
 data Mut = Const | Var deriving (Show, Eq)
 
@@ -67,7 +68,28 @@ data Instr = -- Numeric Instructions --
   -- XXX: Extend onwards not included
   I64Const U64 | I64UnOp IUnOp  | I64BinOp IBinOp | I64TestOp ITestOp | I64RelOp IRelOp |
   F32Const F32 | F32FUnOp FUnOp | F32BinOp FBinOp | F32RelOp FRelOp   |
-  F64Const F64 | F64FUnOp FUnOp | F64BinOp FBinOp | F64RelOp FRelOp
+  F64Const F64 | F64FUnOp FUnOp | F64BinOp FBinOp | F64RelOp FRelOp   |
+
+  -- XXX: Vector instructions not included
+
+  -- Reference Instructions
+  RefNull RefType | Ref_IsNull | Ref FuncIdx |
+
+  -- Parametric Instructions
+  Drop | Select (Maybe ValType) |
+
+  -- Variable Instructions
+  LocalGet LocalIdx   | LocalSet LocalIdx   | LocalTee LocalIdx |
+  GlobalGet GlobalIdx | GlobalSet GlobalIdx |
+
+  -- Table Instructions
+  TableGet TableIdx  | TableSet TableIdx  | TableSize TableIdx |
+  TableGrow TableIdx | TableFill TableIdx | TableCopy TableIdx TableIdx |
+  TableInit TableIdx ElemIdx | ElemDrop ElemIdx
+
+  -- Memory Instructions
+
+  -- Control Instructions
   deriving (Show, Eq)
 
 data IUnOp  = Clz  | Ctz | PopCnt deriving (Show, Eq)
@@ -86,6 +108,19 @@ data IRelOp  = EQ   | NE   | LT_U | LT_S | GT_U
 data FRelOp = EQ_F | NE_F | LT_F | GT_F | LE_F | GE_F deriving (Show, Eq)
 
 -----------------------Instructions---------------------
+
+-------------------Indices/Pointers---------------------
+type TypeIdx   = U32
+type FuncIdx   = U32
+type TableIdx  = U32
+type MemIdx    = U32
+type GlobalIdx = U32
+type ElemIdx   = U32
+type DataIdx   = U32
+type LocalIdx  = U32
+type LabelIdx  = U32
+-------------------Indices/Pointers---------------------
+
 
 data Trap
 
