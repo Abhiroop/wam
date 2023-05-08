@@ -1,5 +1,5 @@
 ## wam!
 
-<img src="logo.png" alt="wam" width="200"/>
+<img src="logo.png" alt="wam" width="170"/>
 
 wasm abstract machine
