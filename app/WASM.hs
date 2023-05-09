@@ -116,8 +116,8 @@ data BlockType = TyIdx TypeIdx
                | ValTy (Maybe ValType) -- shorthand for () -> Maybe ValType
                deriving (Show, Eq)
 
-data Offset = Offset U32 deriving (Show, Eq) -- address offset
-data Align  = Align  U32 deriving (Show, Eq) -- alignment
+newtype Offset = Offset U32 deriving (Show, Eq) -- address offset
+newtype Align  = Align  U32 deriving (Show, Eq) -- alignment
 type MemArg = (Offset, Align)
 
 data IUnOp  = Clz  | Ctz | PopCnt deriving (Show, Eq)
