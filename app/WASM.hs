@@ -1,8 +1,8 @@
 module WASM where
 
--- import Data.Array
 import Data.Int
 import Data.Word
+import Data.Vector.Mutable
 
 type I32 = Int32
 type I64 = Int64
