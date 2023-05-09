@@ -1,5 +1,6 @@
 module WASM where
 
+-- import Data.Array
 import Data.Int
 import Data.Word
 
@@ -85,12 +86,39 @@ data Instr = -- Numeric Instructions --
   -- Table Instructions
   TableGet TableIdx  | TableSet TableIdx  | TableSize TableIdx |
   TableGrow TableIdx | TableFill TableIdx | TableCopy TableIdx TableIdx |
-  TableInit TableIdx ElemIdx | ElemDrop ElemIdx
+  TableInit TableIdx ElemIdx | ElemDrop ElemIdx |
 
   -- Memory Instructions
+  LOADI32     MemArg | STOREI32    MemArg | LOAD8I32_U MemArg | LOAD8I32_S MemArg |
+  LOAD16I32_U MemArg | LOAD16I32_S MemArg | STORE8I32  MemArg | STORE16I32 MemArg |
+  LOADI64     MemArg | STOREI64    MemArg | LOAD8I64_U MemArg | LOAD8I64_S MemArg |
+  LOAD16I64_U MemArg | LOAD16I64_S MemArg | STORE8I64  MemArg | STORE16I64 MemArg |
+  LOAD32I64_U MemArg | LOAD32I64_S MemArg | STORE32I64 MemArg |
+  LOADF32     MemArg | LOADF64     MemArg | STOREF32   MemArg | STOREF64   MemArg |
+  -- XXX: Vector load-store ignored
+  MemorySIZE | MemoryGROW         | MemoryFILL |
+  MemoryCOPY | MemoryINIT DataIdx | DataDROP DataIdx |
 
   -- Control Instructions
+  NOP | UNREACHABLE |
+  Block  BlockType [Instr] |
+  Loop   BlockType [Instr] |
+  IFELSE BlockType [Instr] [Instr] |
+  BR LabelIdx | BR_IF LabelIdx |
+  BR_Table [LabelIdx] LabelIdx | -- switch-case; last idx is default
+  RETURN | CALL FuncIdx | CALL_INDIRECT TableIdx TypeIdx
   deriving (Show, Eq)
+
+type Expr = [Instr]
+
+
+data BlockType = TyIdx TypeIdx
+               | ValTy (Maybe ValType) -- shorthand for () -> Maybe ValType
+               deriving (Show, Eq)
+
+data Offset = Offset U32 deriving (Show, Eq) -- address offset
+data Align  = Align  U32 deriving (Show, Eq) -- alignment
+type MemArg = (Offset, Align)
 
 data IUnOp  = Clz  | Ctz | PopCnt deriving (Show, Eq)
 data IBinOp = ADD | SUB | MUL | DIV_U | DIV_S | REM_U | REM_S
@@ -109,7 +137,10 @@ data FRelOp = EQ_F | NE_F | LT_F | GT_F | LE_F | GE_F deriving (Show, Eq)
 
 -----------------------Instructions---------------------
 
--------------------Indices/Pointers---------------------
+------------------------Modules-------------------------
+
+
+-- Indices/Pointers
 type TypeIdx   = U32
 type FuncIdx   = U32
 type TableIdx  = U32
@@ -119,7 +150,8 @@ type ElemIdx   = U32
 type DataIdx   = U32
 type LocalIdx  = U32
 type LabelIdx  = U32
--------------------Indices/Pointers---------------------
+------------------------Modules-------------------------
+
 
 
 data Trap
