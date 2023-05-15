@@ -1,9 +1,14 @@
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 module WASM where
 
 import Data.Int
 import Data.Word
-import qualified Data.Vector as V
+import Data.Vector (Vector, modify, (!), (!?))
 import Data.Vector.Generic.Mutable (write)
+
+import qualified Control.Monad.Trans.State.Strict as S
 
 type I8   = Int8
 type I16  = Int16
@@ -23,14 +28,17 @@ data Value = Byte Byte
            | S32  I32  | S64  I64
            | S8   I8   | S16  I16
            | Fl32 F32  | Fl64 F64
-           | Vec128 [Value] -- representing vectors as a list now
-           | Name Name
-           | Ref  Pointer   -- not in spec but might be convenient (NOTE 2)
+           | Vec128 (Vector Value)
+           -- references
+           | Ref Ref
            deriving (Show, Eq)
 
-type Name = [Char]
+data Ref = Ref_Null  RefType
+         | RefFAddr  FuncAddr
+         | RefExtern ExternAddr
+         deriving (Show, Eq)
 
-type Pointer = Word
+type Name = [Char]
 
 -----------------------VALUES----------------------------
 
@@ -169,11 +177,13 @@ data Function = Function { f_ty     :: TypeIdx   -- index to `types` field in Mo
                 deriving (Show, Eq)
 
 -- Mimics function pointers
-data Table   = T TableType Pointer deriving (Show, Eq)
+data Table   = T TableType Word32 deriving (Show, Eq)
+-- XXX: Word32 is an opaque value of a particular reference type
+-- https://webassembly.github.io/spec/core/syntax/modules.html#tables
 
 ------------------Memory--------------------
 
-data Memory = Memory MemType (V.Vector Byte) deriving (Show, Eq)
+data Memory = Memory MemType (Vector Byte) deriving (Show, Eq)
 
 -- NOTE 1;
 -- https://webassembly.github.io/spec/core/syntax/modules.html#memories
@@ -189,13 +199,6 @@ data Global = G { g_ty   :: GlobalType
                 }
               deriving (Show, Eq)
 
--- NOTE 2
--- A global can have a `GlobalType` and a `GlobalType` includes a reference
--- type so if there is a global element with the reference type we can store
--- a `Ref x` in the `val` field, where `x` is the pointer. Albeit the integer
--- types in `Value` can capture pointer but tagging it with the `Ref` tag
--- makes it more legible. Might need to revise this.
-
 
 data Elem = Elem { e_ty   :: RefType
                  , e_init :: [Expr]
@@ -210,7 +213,7 @@ data ElemMode = EPassive
               deriving (Show, Eq)
 
 
-data MemData = MemData { d_init :: V.Vector Byte
+data MemData = MemData { d_init :: Vector Byte
                        , d_mode :: MemDataMode
                        }
              deriving (Show, Eq)
@@ -260,20 +263,150 @@ type LabelIdx  = U32
 
 ------------------------Modules-------------------------
 
+data Result = Result Value
+            | Trap
+            deriving (Show, Eq)
 
 
-data Trap
+---------------Runtime Structures------------------------
+
+-- Using Vector on all of the instances for better performance
+
+data Store = Store { funcInst  :: Vector FuncInst
+                   , tableInst :: Vector TableInst
+                   , memInst   :: Vector MemInst
+                   , glblInst  :: Vector GlobalInst
+                   , elemInst  :: Vector ElemInst
+                   , datasInst :: Vector DataInst
+                   }
+             deriving (Show, Eq)
+
+
+data FuncInst =
+      FuncInst { funcType   :: FuncType
+               , moduleInst :: ModuleInst
+               , code       :: Function
+               }
+    | HostInst { funcType   :: FuncType
+               , hostCode   :: HostFunc
+               }
+    deriving (Show, Eq)
+
+newtype HostFunc = HostFunc (Vector Value -> IO (Vector Value))
+
+instance Show HostFunc where
+  show (HostFunc _) = "<nil>"
+
+instance Eq HostFunc where
+  (HostFunc _) == (HostFunc _)
+    = error "Cannot compare functions"
+
+data ModuleInst = ModuleInst { funcTypes   :: Vector FuncType
+                             , funcaddrs   :: Vector Addr
+                             , tableaddrs  :: Vector Addr
+                             , memaddrs    :: Vector Addr
+                             , globaladdrs :: Vector Addr
+                             , exportsM    :: Vector ExportInst
+                             }
+                deriving (Eq, Show)
+
+data ExportInst = ExportInst { exportName  :: Name
+                             , exportValue :: ExternVal
+                             }
+                  deriving (Eq, Show)
+
+data ExternVal = ExternFunc  FuncAddr
+               | ExternTable TableAddr
+               | ExternMem   MemAddr
+               | ExternGlbl  GlobalAddr
+               deriving (Show, Eq)
+
+data TableInst = TableInst { tableTy   :: TableType
+                           , tableElem :: Vector Ref
+                           }
+                 deriving (Show, Eq)
+
+data MemInst = MemInst { memTy   :: MemType
+                       , memData :: Vector Byte
+                       }
+               deriving (Show, Eq)
+
+data GlobalInst = GlobalInst { gTy  :: GlobalType
+                             , gVal :: Value
+                             }
+                  deriving (Show, Eq)
+
+data ElemInst = ElemInst { eTy   :: RefType
+                         , eElem :: Vector Ref
+                         }
+              deriving (Show, Eq)
+
+data DataInst = DataInst (Vector Byte) deriving (Show, Eq)
+
+type Stack = [StackVal]
+
+type ArgArity = Int
+
+data StackVal = Val Value
+              | Label ArgArity BranchTarget
+              | Frame { arity   :: ArgArity
+                      , locals  :: Vector Value
+                      , modinst :: ModuleInst
+                      }
+              deriving (Show, Eq)
+
+type BranchTarget = [Instr] -- XXX: maybe an index is a better representation
+
+---------------Runtime Structures------------------------
+
+
+data WAM = WAM { store :: Store
+               , stack :: Stack
+               } deriving (Show, Eq)
+
+
+newtype Interpreter a = Interpreter { runInterp :: S.State WAM a }
+  deriving (Functor, Applicative, Monad)
+
+
+interp :: Interpreter Result
+interp = undefined
+{- do
+l <- gets state
+let (WAM {store = str) =l 
+search store and get instruction i
+eval i
+
+-}
+
+-- s |- E[i] ==> (s', a)
+eval :: Instr -> Interpreter Result
+eval (I32Const u32) = undefined
+-- eval WAM {stack = s, store{shadowstack, heap} = str,...}(CALL funcidx (Just lib) policy) =
+  -- walk the stack and box all the data which are not in the policy
+  -- eval error
+-- have a State monad where the program state are the two things above
 
 
 
+----------------------Addresses-------------------------
+type Addr       = Word32
+type FuncAddr   = Addr
+type TableAddr  = Addr
+type MemAddr    = Addr
+type GlobalAddr = Addr
+type ElemAddr   = Addr
+type DataAddr   = Addr
+type ExternAddr = Addr
+----------------------Addresses-------------------------
 
-read :: V.Vector a -> Int -> a
-read vec idx = vec V.! idx
+read :: Vector a -> Int -> a
+read vec idx = vec ! idx
 
-safeRead :: V.Vector a -> Int -> Maybe a
-safeRead vec idx = vec V.!? idx
+safeRead :: Vector a -> Int -> Maybe a
+safeRead vec idx = vec !? idx
 
 -- The operation will be performed in place if it is safe
 -- to do so and will modify a copy of the vector otherwise.
-update :: V.Vector a -> Int -> a -> V.Vector a
-update vec idx val = V.modify (\v -> write v idx val) vec
+update :: Vector a -> Int -> a -> Vector a
+update vec idx val = modify (\v -> write v idx val) vec
