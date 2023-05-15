@@ -1,14 +1,17 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE NamedFieldPuns #-}
 
 module WASM where
 
+import Data.Bits
 import Data.Int
 import Data.Word
 import Data.Vector (Vector, modify, (!), (!?))
 import Data.Vector.Generic.Mutable (write)
 
-import qualified Control.Monad.Trans.State.Strict as S
+
+import qualified Control.Monad.State.Strict as S
 
 type I8   = Int8
 type I16  = Int16
@@ -68,7 +71,6 @@ type MemType = Limits
 data TableType = TTy Limits RefType deriving (Show, Eq)-- tabletype ::= limits reftype
 
 data Mut = Const | Var deriving (Show, Eq)
-
 data GlobalType = GTy Mut ValType deriving (Show, Eq)
 
 data ExternType = Func FuncType
@@ -263,10 +265,18 @@ type LabelIdx  = U32
 
 ------------------------Modules-------------------------
 
-data Result = Result Value
+
+data Result = Result Val
             | Trap
             deriving (Show, Eq)
 
+data Val = VI32 U32
+         | VI64 U64
+         | VF32 Float
+         | VF64 Double
+         | VVec128 [Val] -- represent vectors as list
+         | VRef Ref      -- Ref is defined at the top
+         deriving (Show, Eq)
 
 ---------------Runtime Structures------------------------
 
@@ -292,7 +302,7 @@ data FuncInst =
                }
     deriving (Show, Eq)
 
-newtype HostFunc = HostFunc (Vector Value -> IO (Vector Value))
+newtype HostFunc = HostFunc (Vector Val -> IO (Vector Val))
 
 instance Show HostFunc where
   show (HostFunc _) = "<nil>"
@@ -332,7 +342,7 @@ data MemInst = MemInst { memTy   :: MemType
                deriving (Show, Eq)
 
 data GlobalInst = GlobalInst { gTy  :: GlobalType
-                             , gVal :: Value
+                             , gVal :: Val
                              }
                   deriving (Show, Eq)
 
@@ -347,45 +357,15 @@ type Stack = [StackVal]
 
 type ArgArity = Int
 
-data StackVal = Val Value
+data StackVal = Val Val
               | Label ArgArity BranchTarget
               | Frame { arity   :: ArgArity
-                      , locals  :: Vector Value
+                      , locals  :: Vector Val
                       , modinst :: ModuleInst
                       }
               deriving (Show, Eq)
 
 type BranchTarget = [Instr] -- XXX: maybe an index is a better representation
-
----------------Runtime Structures------------------------
-
-
-data WAM = WAM { store :: Store
-               , stack :: Stack
-               } deriving (Show, Eq)
-
-
-newtype Interpreter a = Interpreter { runInterp :: S.State WAM a }
-  deriving (Functor, Applicative, Monad)
-
-
-interp :: Interpreter Result
-interp = undefined
-{- do
-l <- gets state
-let (WAM {store = str) =l 
-search store and get instruction i
-eval i
-
--}
-
--- s |- E[i] ==> (s', a)
-eval :: Instr -> Interpreter Result
-eval (I32Const u32) = undefined
--- eval WAM {stack = s, store{shadowstack, heap} = str,...}(CALL funcidx (Just lib) policy) =
-  -- walk the stack and box all the data which are not in the policy
-  -- eval error
--- have a State monad where the program state are the two things above
 
 
 
@@ -399,6 +379,100 @@ type ElemAddr   = Addr
 type DataAddr   = Addr
 type ExternAddr = Addr
 ----------------------Addresses-------------------------
+
+---------------Runtime Structures------------------------
+
+
+data WAM = WAM { store :: Store
+               , stack :: Stack
+               } deriving (Show, Eq)
+
+
+newtype Interpreter a = Interpreter { runInterp :: S.State WAM a }
+  deriving (Functor, Applicative, Monad, S.MonadState WAM)
+
+
+interp :: Interpreter Result
+interp = undefined
+{- do
+l <- gets state
+let (WAM {store = str) =l 
+search store and get instruction i
+eval i
+
+-}
+
+type ErrMsg = String
+
+data EvalRes = Success
+             | TRAP ErrMsg
+             | Undefined
+             deriving (Show, Eq)
+
+
+
+pop :: Interpreter StackVal
+pop = do
+  st <- S.gets stack
+  let (h:st') = st -- validation ensures this doesn't fail
+  S.modify $ \s -> s {stack = st'}
+  return h
+
+push :: StackVal -> Interpreter ()
+push sval = do
+  st <- S.gets stack
+  S.modify $ \s -> s {stack = sval : st}
+
+-- s ⊢ E[i] ==> (s', a)
+eval :: Instr -> Interpreter EvalRes
+eval (I32Const u32) = do
+  push (Val (VI32 u32)) -- XXX: Note VI32 is unsigned (see spec)
+  return Success
+eval (I64Const u64) = do
+  push (Val (VI64 u64)) -- XXX: Note VI64 is unsigned (see spec)
+  return Success
+eval (F32Const f32) = do
+  push (Val (VF32 f32))
+  return Success
+eval (F64Const f64) = do
+  push (Val (VF64 f64))
+  return Success
+
+eval (I32UnOp iunop) = do
+  e <- pop
+  let (Val val) = e
+  let res = case (iunop, val) of
+              (PopCnt, VI32 i32) -> Right $ VI32 $ toEnum $ popCount i32
+              (Clz,    VI32 i32) -> Right $ VI32 $ toEnum $ countLeadingZeros i32
+              (Ctz,    VI32 i32) -> Right $ VI32 $ toEnum $ countTrailingZeros i32
+              _ -> Left "POPCNT || Clz || Ctz i32 : Validation failed"
+  case res of
+    Left errmsg -> return (TRAP errmsg)
+    Right r -> do
+      push (Val r)
+      return Success
+eval (I64UnOp iunop) = do
+  e <- pop
+  let (Val val) = e
+  let res = case (iunop, val) of
+              (PopCnt, VI64 i64) -> Right $ VI64 $ toEnum $ popCount i64
+              (Clz,    VI64 i64) -> Right $ VI64 $ toEnum $ countLeadingZeros i64
+              (Ctz,    VI64 i64) -> Right $ VI64 $ toEnum $ countTrailingZeros i64
+              _ -> Left "POPCNT || Clz || Ctz i64 : Validation failed"
+  case res of
+    Left errmsg -> return (TRAP errmsg)
+    Right r -> do
+      push (Val r)
+      return Success
+
+
+
+
+
+
+-- eval WAM {stack = s, store{shadowstack, heap} = str,...}(CALL funcidx (Just lib) policy) =
+  -- walk the stack and box all the data which are not in the policy
+  -- eval error
 
 read :: Vector a -> Int -> a
 read vec idx = vec ! idx
