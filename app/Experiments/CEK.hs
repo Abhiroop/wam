@@ -77,3 +77,23 @@ evaluate pr = terminal step isFinal (inject(pr))
 -- We could have simply used the State monad instead
 -- of the recursive terminal function; but its nice
 -- in that the recursion is captured outside the semantics.
+
+
+
+-----------------------------------------------------------------
+
+
+-- data Foo = Foo { a :: Int} deriving (Show, Generic)
+
+-- data Bar = Bar { f :: Foo, b :: Int} deriving (Show, Generic)
+
+-- x = Bar (Foo 3) 5
+
+-- foo = x & field @"f" . field @"a" .~ 42
+
+-- baz = x ^. field @"f" ^. field @"a"
+
+
+
+
+-----------------------------------------------------------------

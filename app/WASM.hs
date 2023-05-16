@@ -1,17 +1,27 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE TemplateHaskell #-}
+
+-- for Lenses
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TypeApplications #-}
+
 
 module WASM where
 
 import Data.Bits
 import Data.Int
-
+import Data.Maybe
 import Data.Word
 import Data.Vector (Vector, modify, (!), (!?))
 import Data.Vector.Generic.Mutable (write)
 
+-- for Lenses
+import Data.Function ((&))
+import Data.Generics.Internal.VL
+import Data.Generics.Product.Fields
+import GHC.Generics
 
 import qualified Control.Monad.State.Strict as S
 
@@ -291,7 +301,7 @@ data Store = Store { funcInst  :: Vector FuncInst
                    , elemInst  :: Vector ElemInst
                    , datasInst :: Vector DataInst
                    }
-             deriving (Show, Eq)
+             deriving (Show, Eq, Generic)
 
 data Frame = Frame { arity   :: ArgArity
                    , locals  :: Vector Val
@@ -351,7 +361,7 @@ data MemInst = MemInst { memTy   :: MemType
 data GlobalInst = GlobalInst { gTy  :: GlobalType
                              , gVal :: Val
                              }
-                  deriving (Show, Eq)
+                  deriving (Show, Eq, Generic)
 
 data ElemInst = ElemInst { eTy   :: RefType
                          , eElem :: Vector Ref
@@ -389,7 +399,7 @@ type ExternAddr = Addr
 data WAM = WAM { store :: Store
                , stack :: Stack
                , frame :: Frame -- as per the reference interpreter
-               } deriving (Show, Eq)
+               } deriving (Show, Eq, Generic)
 
 
 newtype Interpreter a = Interpreter { runInterp :: S.State WAM a }
@@ -527,7 +537,36 @@ eval (LocalTee lidx_u32) = do
   push (Val val)
   push (Val val)
   eval (LocalSet lidx_u32)
+eval (GlobalGet gidx_u32) = do
+  f <- S.gets frame
+  let a = fromMaybe (error "GlobalAddr read error in GlobalGet") $
+          safeRead (globaladdrs (modinst f)) (fromEnum gidx_u32)
+  str  <- S.gets store
+  let gI = glblInst str
+  let glbl = fromMaybe (error "GlobalInst read error in GlobalGet") $
+             safeRead gI (fromEnum a)
+  push (Val (gVal glbl))
+  return Success
 
+eval (GlobalSet gidx_u32) = do
+  e <- pop
+  let (Val val) = e
+
+
+  f <- S.gets frame
+  let a = fromMaybe (error "GlobalAddr read error in GlobalSet") $
+          safeRead (globaladdrs (modinst f)) (fromEnum gidx_u32)
+
+  vec_gI <- fmap glblInst (S.gets store)
+
+  let gI =
+        fromMaybe (error "GlobalInst read error in GlobalSet") $
+        safeRead vec_gI (fromEnum a)
+
+
+  let gI'  = update vec_gI (fromEnum a) (gI & field @"gVal" .~ val)
+  S.modify (\s -> s & field @"store" . field @"glblInst" .~ gI')
+  return Success
 
 asInt32 :: Word32 -> Int32
 asInt32 w =

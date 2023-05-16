@@ -71,7 +71,7 @@ executable wam
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.13.0.0, mtl, vector
+    build-depends:    base ^>=4.16.0.0, generic-lens, mtl, vector
 
     -- Directories containing source files.
     hs-source-dirs:   app
