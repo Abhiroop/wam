@@ -1,11 +1,13 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module WASM where
 
 import Data.Bits
 import Data.Int
+
 import Data.Word
 import Data.Vector (Vector, modify, (!), (!?))
 import Data.Vector.Generic.Mutable (write)
@@ -96,7 +98,7 @@ data Instr = -- Numeric Instructions --
   RefNull RefType | Ref_IsNull | RefFunc FuncIdx |
 
   -- Parametric Instructions
-  Drop | Select (Maybe ValType) |
+  Drop | Select (Maybe [ValType]) |
 
   -- Variable Instructions
   LocalGet LocalIdx   | LocalSet LocalIdx   | LocalTee LocalIdx |
@@ -291,6 +293,11 @@ data Store = Store { funcInst  :: Vector FuncInst
                    }
              deriving (Show, Eq)
 
+data Frame = Frame { arity   :: ArgArity
+                   , locals  :: Vector Val
+                   , modinst :: ModuleInst
+                   } deriving (Show, Eq)
+
 
 data FuncInst =
       FuncInst { funcType   :: FuncType
@@ -359,10 +366,6 @@ type ArgArity = Int
 
 data StackVal = Val Val
               | Label ArgArity BranchTarget
-              | Frame { arity   :: ArgArity
-                      , locals  :: Vector Val
-                      , modinst :: ModuleInst
-                      }
               deriving (Show, Eq)
 
 type BranchTarget = [Instr] -- XXX: maybe an index is a better representation
@@ -385,6 +388,7 @@ type ExternAddr = Addr
 
 data WAM = WAM { store :: Store
                , stack :: Stack
+               , frame :: Frame -- as per the reference interpreter
                } deriving (Show, Eq)
 
 
@@ -410,7 +414,6 @@ data EvalRes = Success
              deriving (Show, Eq)
 
 
-
 pop :: Interpreter StackVal
 pop = do
   st <- S.gets stack
@@ -422,6 +425,19 @@ push :: StackVal -> Interpreter ()
 push sval = do
   st <- S.gets stack
   S.modify $ \s -> s {stack = sval : st}
+
+get_local_at_idx :: LocalIdx -> Interpreter Val
+get_local_at_idx lidx_u32 = do
+  f <- S.gets frame
+  case safeRead (locals f) (fromEnum lidx_u32) of
+    Nothing -> error $ "Validation failed; local.get for " <> (show lidx_u32)
+    Just x  -> return x
+
+set_local_at_idx :: LocalIdx -> Val -> Interpreter ()
+set_local_at_idx lidx_u32 val = do
+  (Frame {arity, locals, modinst}) <- S.gets frame
+  let l' = update locals (fromEnum lidx_u32) val
+  S.modify $ \s -> s { frame = Frame {arity, locals = l', modinst}}
 
 -- s ⊢ E[i] ==> (s', a)
 eval :: Instr -> Interpreter EvalRes
@@ -465,10 +481,65 @@ eval (I64UnOp iunop) = do
       push (Val r)
       return Success
 
+eval (I32BinOp ibinop) = do
+  c2 <- pop
+  c1 <- pop
+  let (Val val2, Val val1) = (c2, c1)
+  let res = case (ibinop, val2, val1) of
+              (ADD, VI32 i32_2, VI32 i32_1) -> Right $ VI32 $ i32_1 + i32_2
+              (SUB, VI32 i32_2, VI32 i32_1) -> Right $ VI32 $ i32_1 - i32_2
+              (MUL, VI32 i32_2, VI32 i32_1) -> Right $ VI32 $ i32_1 * i32_2
+              _ -> Left "i32 : BinOp not implemented or validation failed"
+  case res of
+    Left errmsg -> return (TRAP errmsg)
+    Right r -> do
+      push (Val r)
+      return Success
+eval (I64BinOp ibinop) = do
+  c2 <- pop
+  c1 <- pop
+  let (Val val2, Val val1) = (c2, c1)
+  let res = case (ibinop, val2, val1) of
+              (ADD, VI64 i64_2, VI64 i64_1) -> Right $ VI64 $ i64_1 + i64_2
+              (SUB, VI64 i64_2, VI64 i64_1) -> Right $ VI64 $ i64_1 - i64_2
+              (MUL, VI64 i64_2, VI64 i64_1) -> Right $ VI64 $ i64_1 * i64_2
+              _ -> Left "i64 : BinOp not implemented or validation failed"
+  case res of
+    Left errmsg -> return (TRAP errmsg)
+    Right r -> do
+      push (Val r)
+      return Success
+
+-- variable instructions
+
+eval (LocalGet lidx_u32) = do
+  val <- get_local_at_idx lidx_u32
+  push (Val val)
+  return Success
+eval (LocalSet lidx_u32) = do
+  e <- pop
+  let (Val val) = e
+  set_local_at_idx lidx_u32 val
+  return Success
+eval (LocalTee lidx_u32) = do
+  e <- pop
+  let (Val val) = e
+  push (Val val)
+  push (Val val)
+  eval (LocalSet lidx_u32)
 
 
+asInt32 :: Word32 -> Int32
+asInt32 w =
+    if w < 0x80000000
+    then fromIntegral w
+    else -1 * fromIntegral (0xFFFFFFFF - w + 1)
 
-
+asInt64 :: Word64 -> Int64
+asInt64 w =
+    if w < 0x8000000000000000
+    then fromIntegral w
+    else -1 * fromIntegral (0xFFFFFFFFFFFFFFFF - w + 1)
 
 -- eval WAM {stack = s, store{shadowstack, heap} = str,...}(CALL funcidx (Just lib) policy) =
   -- walk the stack and box all the data which are not in the policy
