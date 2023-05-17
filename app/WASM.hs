@@ -12,9 +12,9 @@ module WASM where
 
 import Data.Bits
 import Data.Int
-import Data.Maybe
+
 import Data.Word
-import Data.Vector (Vector, modify, (!), (!?))
+import Data.Vector (Vector, modify, (!), (!?), slice, toList)
 import Data.Vector.Generic.Mutable (write)
 
 -- for Lenses
@@ -306,7 +306,7 @@ data Store = Store { funcInst  :: Vector FuncInst
 data Frame = Frame { arity   :: ArgArity
                    , locals  :: Vector Val
                    , modinst :: ModuleInst
-                   } deriving (Show, Eq)
+                   } deriving (Show, Eq, Generic)
 
 
 data FuncInst =
@@ -331,11 +331,14 @@ instance Eq HostFunc where
 data ModuleInst = ModuleInst { funcTypes   :: Vector FuncType
                              , funcaddrs   :: Vector Addr
                              , tableaddrs  :: Vector Addr
-                             , memaddrs    :: Vector Addr
+                             , memaddrs    :: Vector Addr -- XXX: **
                              , globaladdrs :: Vector Addr
                              , exportsM    :: Vector ExportInst
                              }
-                deriving (Eq, Show)
+                deriving (Eq, Show, Generic)
+
+-- ** Although memaddrs is `Vector Addr` in the current spec only
+-- the 0th element is occupied
 
 data ExportInst = ExportInst { exportName  :: Name
                              , exportValue :: ExternVal
@@ -539,13 +542,11 @@ eval (LocalTee lidx_u32) = do
   eval (LocalSet lidx_u32)
 eval (GlobalGet gidx_u32) = do
   f <- S.gets frame
-  let a = fromMaybe (error "GlobalAddr read error in GlobalGet") $
-          safeRead (globaladdrs (modinst f)) (fromEnum gidx_u32)
-  str  <- S.gets store
-  let gI = glblInst str
-  let glbl = fromMaybe (error "GlobalInst read error in GlobalGet") $
-             safeRead gI (fromEnum a)
-  push (Val (gVal glbl))
+  let a = (globaladdrs (modinst f)) ! (fromEnum gidx_u32)
+  s  <- S.gets store
+  let glob = (glblInst s) ! (fromEnum a)
+  let val  = gVal glob
+  push (Val val)
   return Success
 
 eval (GlobalSet gidx_u32) = do
@@ -554,19 +555,56 @@ eval (GlobalSet gidx_u32) = do
 
 
   f <- S.gets frame
-  let a = fromMaybe (error "GlobalAddr read error in GlobalSet") $
-          safeRead (globaladdrs (modinst f)) (fromEnum gidx_u32)
+  let a = (globaladdrs (modinst f)) ! (fromEnum gidx_u32)
 
-  vec_gI <- fmap glblInst (S.gets store)
+  s <- S.gets store
+  let vec_gI = glblInst s
+  let glob = vec_gI ! (fromEnum a)
 
-  let gI =
-        fromMaybe (error "GlobalInst read error in GlobalSet") $
-        safeRead vec_gI (fromEnum a)
-
-
-  let gI'  = update vec_gI (fromEnum a) (gI & field @"gVal" .~ val)
-  S.modify (\s -> s & field @"store" . field @"glblInst" .~ gI')
+  let vec_gI' = update vec_gI (fromEnum a) (glob & field @"gVal" .~ val)
+  S.modify (\s -> s & field @"store" . field @"glblInst" .~ vec_gI')
   return Success
+
+eval (LOADI32 (Offset offset, _)) = do
+  f <- S.gets frame
+  s <- S.gets store
+
+  let a = (f ^. field @"modinst" ^. field @"memaddrs") ! 0
+  let mem = (memInst s) ! (fromEnum a)
+
+  e <- pop
+  let (Val (VI32 i)) = e -- assertion should verify these
+
+  let ea = i + offset
+  let n = 32 -- bitwidth I32
+  let mem_data = memData mem
+  let ea_int   = fromEnum ea
+  if (ea_int + (n `div` 8)) > (length mem_data)
+  then return $ TRAP "Memory OOB in LOADI32"
+  else do
+    let b = slice ea_int (ea_int + 4) mem_data
+    let c = lEndianToi32 b
+    push (Val (VI32 c))
+    return Success
+
+eval (STOREI32 memarg) = do
+  return Success
+
+bitwidth :: Val -> Int
+bitwidth (VI32 _) = 32
+bitwidth (VF32 _) = 32
+bitwidth (VI64 _) = 64
+bitwidth (VF64 _) = 64
+bitwidth (VRef _) = 32
+bitwidth (VVec128 _) = 128
+
+-- Byte operations should be QuickCheck'd or have LiquidHaskell constraints
+
+-- the Vector is guaranteed to contain 4 elements
+lEndianToi32 :: Vector Byte -> U32
+lEndianToi32 =
+  sum . map (\(i, b) -> fromIntegral $ shiftL b i) . zip [0..3] . toList
+
 
 asInt32 :: Word32 -> Int32
 asInt32 w =
@@ -580,12 +618,9 @@ asInt64 w =
     then fromIntegral w
     else -1 * fromIntegral (0xFFFFFFFFFFFFFFFF - w + 1)
 
--- eval WAM {stack = s, store{shadowstack, heap} = str,...}(CALL funcidx (Just lib) policy) =
-  -- walk the stack and box all the data which are not in the policy
-  -- eval error
 
-read :: Vector a -> Int -> a
-read vec idx = vec ! idx
+readVec :: Vector a -> Int -> a
+readVec vec idx = vec ! idx
 
 safeRead :: Vector a -> Int -> Maybe a
 safeRead vec idx = vec !? idx
