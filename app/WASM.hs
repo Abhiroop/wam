@@ -12,9 +12,11 @@ module WASM where
 
 import Data.Bits
 import Data.Int
-
 import Data.Word
-import Data.Vector (Vector, modify, (!), (!?), slice, toList)
+import Data.Vector (Vector, modify,
+                    (!), (!?),
+                    (//), generate,
+                    slice, toList, ifoldl')
 import Data.Vector.Generic.Mutable (write)
 
 -- for Lenses
@@ -23,6 +25,7 @@ import Data.Generics.Internal.VL
 import Data.Generics.Product.Fields
 import GHC.Generics
 
+import qualified Test.QuickCheck as QC
 import qualified Control.Monad.State.Strict as S
 
 type I8   = Int8
@@ -359,7 +362,7 @@ data TableInst = TableInst { tableTy   :: TableType
 data MemInst = MemInst { memTy   :: MemType
                        , memData :: Vector Byte
                        }
-               deriving (Show, Eq)
+               deriving (Show, Eq, Generic)
 
 data GlobalInst = GlobalInst { gTy  :: GlobalType
                              , gVal :: Val
@@ -409,13 +412,13 @@ newtype Interpreter a = Interpreter { runInterp :: S.State WAM a }
   deriving (Functor, Applicative, Monad, S.MonadState WAM)
 
 
-interp :: Interpreter Result
-interp = undefined
+eval :: Interpreter Result
+eval = undefined
 {- do
 l <- gets state
 let (WAM {store = str) =l 
 search store and get instruction i
-eval i
+step i
 
 -}
 
@@ -453,21 +456,21 @@ set_local_at_idx lidx_u32 val = do
   S.modify $ \s -> s { frame = Frame {arity, locals = l', modinst}}
 
 -- s ⊢ E[i] ==> (s', a)
-eval :: Instr -> Interpreter EvalRes
-eval (I32Const u32) = do
+step :: Instr -> Interpreter EvalRes
+step (I32Const u32) = do
   push (Val (VI32 u32)) -- XXX: Note VI32 is unsigned (see spec)
   return Success
-eval (I64Const u64) = do
+step (I64Const u64) = do
   push (Val (VI64 u64)) -- XXX: Note VI64 is unsigned (see spec)
   return Success
-eval (F32Const f32) = do
+step (F32Const f32) = do
   push (Val (VF32 f32))
   return Success
-eval (F64Const f64) = do
+step (F64Const f64) = do
   push (Val (VF64 f64))
   return Success
 
-eval (I32UnOp iunop) = do
+step (I32UnOp iunop) = do
   e <- pop
   let (Val val) = e
   let res = case (iunop, val) of
@@ -480,7 +483,7 @@ eval (I32UnOp iunop) = do
     Right r -> do
       push (Val r)
       return Success
-eval (I64UnOp iunop) = do
+step (I64UnOp iunop) = do
   e <- pop
   let (Val val) = e
   let res = case (iunop, val) of
@@ -494,7 +497,7 @@ eval (I64UnOp iunop) = do
       push (Val r)
       return Success
 
-eval (I32BinOp ibinop) = do
+step (I32BinOp ibinop) = do
   c2 <- pop
   c1 <- pop
   let (Val val2, Val val1) = (c2, c1)
@@ -508,7 +511,7 @@ eval (I32BinOp ibinop) = do
     Right r -> do
       push (Val r)
       return Success
-eval (I64BinOp ibinop) = do
+step (I64BinOp ibinop) = do
   c2 <- pop
   c1 <- pop
   let (Val val2, Val val1) = (c2, c1)
@@ -525,22 +528,22 @@ eval (I64BinOp ibinop) = do
 
 -- variable instructions
 
-eval (LocalGet lidx_u32) = do
+step (LocalGet lidx_u32) = do
   val <- get_local_at_idx lidx_u32
   push (Val val)
   return Success
-eval (LocalSet lidx_u32) = do
+step (LocalSet lidx_u32) = do
   e <- pop
   let (Val val) = e
   set_local_at_idx lidx_u32 val
   return Success
-eval (LocalTee lidx_u32) = do
+step (LocalTee lidx_u32) = do
   e <- pop
   let (Val val) = e
   push (Val val)
   push (Val val)
-  eval (LocalSet lidx_u32)
-eval (GlobalGet gidx_u32) = do
+  step (LocalSet lidx_u32)
+step (GlobalGet gidx_u32) = do
   f <- S.gets frame
   let a = (globaladdrs (modinst f)) ! (fromEnum gidx_u32)
   s  <- S.gets store
@@ -549,7 +552,7 @@ eval (GlobalGet gidx_u32) = do
   push (Val val)
   return Success
 
-eval (GlobalSet gidx_u32) = do
+step (GlobalSet gidx_u32) = do
   e <- pop
   let (Val val) = e
 
@@ -565,7 +568,7 @@ eval (GlobalSet gidx_u32) = do
   S.modify (\s -> s & field @"store" . field @"glblInst" .~ vec_gI')
   return Success
 
-eval (LOADI32 (Offset offset, _)) = do
+step (LOADI32 (Offset offset, _)) = do
   f <- S.gets frame
   s <- S.gets store
 
@@ -583,12 +586,36 @@ eval (LOADI32 (Offset offset, _)) = do
   then return $ TRAP "Memory OOB in LOADI32"
   else do
     let b = slice ea_int (ea_int + 4) mem_data
-    let c = lEndianToi32 b
+    let c = lEndianToU32 b
     push (Val (VI32 c))
     return Success
 
-eval (STOREI32 memarg) = do
-  return Success
+step (STOREI32 (Offset offset, _)) = do
+  f <- S.gets frame
+  s <- S.gets store
+
+  let a = (f ^. field @"modinst" ^. field @"memaddrs") ! 0
+  let mem = (memInst s) ! (fromEnum a)
+
+  e <- pop
+  let (Val (VI32 c)) = e
+  e2 <- pop
+  let (Val (VI32 i)) = e2
+
+  let ea = i + offset
+  let n = 32 -- bitwidth I32
+  let mem_data = memData mem
+  let ea_int   = fromEnum ea
+  if (ea_int + (n `div` 8)) > (length mem_data)
+  then return $ TRAP "Memory OOB in LOADI32"
+  else do
+    let b = u32TolEndian c
+    let mem_data' = mem_data // zip [ea_int .. (ea_int + 4)] (toList b)
+    let mem'      = mem & field @"memData" .~ mem_data'
+    let memInst'  = update (memInst s) (fromEnum a) mem'
+    S.modify $ \st -> st & field @"store" . field @"memInst" .~ memInst'
+    return Success
+
 
 bitwidth :: Val -> Int
 bitwidth (VI32 _) = 32
@@ -601,9 +628,25 @@ bitwidth (VVec128 _) = 128
 -- Byte operations should be QuickCheck'd or have LiquidHaskell constraints
 
 -- the Vector is guaranteed to contain 4 elements
-lEndianToi32 :: Vector Byte -> U32
-lEndianToi32 =
-  sum . map (\(i, b) -> fromIntegral $ shiftL b i) . zip [0..3] . toList
+lEndianToU32 :: Vector Byte -> U32
+lEndianToU32 vec =
+  ifoldl' (\acc i u8 -> acc .|.
+            (fromIntegral u8 `shiftL` (i * 8)))
+  0 vec
+
+u32TolEndian :: U32 -> Vector Byte
+u32TolEndian u32 =
+  generate 4 (\i -> fromIntegral (u32 `shiftR` (i * 8)))
+
+prop_lendian :: U32 -> Bool
+prop_lendian val = lEndianToU32 (u32TolEndian val) == val
+
+qc_test :: IO ()
+qc_test = QC.quickCheck prop_lendian
+
+foo :: U32
+foo = 78904657
+  --sum . map (\(i, b) -> fromIntegral $ shiftL b i) . zip [0..3] . toList
 
 
 asInt32 :: Word32 -> Int32
